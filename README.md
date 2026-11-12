@@ -63,7 +63,7 @@ if (status & SAKIN_IK_CLIPPED_WORKSPACE) { /* target out of reach */ }
 > is valid C but **not** valid standard C++. In C99 you can still use it; in C++,
 > assign the fields as shown above.
 
-The version is available at compile time as `SAKIN_VERSION` (`"0.2.1"`) and
+The version is available at compile time as `SAKIN_VERSION` (`"0.2.2"`) and
 `SAKIN_VERSION_MAJOR` / `_MINOR` / `_PATCH`.
 
 ## Configuration Macros
@@ -81,7 +81,7 @@ jump tuning live in `sakin_config_t`; see the doc block at the top of
 `sakin.h` for frames/conventions and the theory references (Craig ch. 4;
 De Luca, *Robotics 1: Inverse kinematics*).
 
-Also available: `SAKIN_VERSION` (`"0.2.1"`) and `SAKIN_VERSION_MAJOR` /
+Also available: `SAKIN_VERSION` (`"0.2.2"`) and `SAKIN_VERSION_MAJOR` /
 `_MINOR` / `_PATCH`.
 
 > `SAKIN_STATIC` gives every public function internal linkage. The flip side is
@@ -224,6 +224,10 @@ cc -std=c99 -Wall -Wextra -Werror -pedantic tests/regress_deadband_hysteresis.c 
 ./regress_deadband
 cc -std=c99 -Wall -Wextra -Werror -pedantic tests/regress_large_dt.c -lm -o regress_dt
 ./regress_dt
+cc -std=c99 -Wall -Wextra -Werror -pedantic tests/regress_low_lift.c -lm -o regress_low_lift
+./regress_low_lift
+cc -std=c99 -Wall -Wextra -Werror -pedantic tests/regress_reset_jump.c -lm -o regress_reset_jump
+./regress_reset_jump
 ```
 
 `sakin.c` is the optional convenience implementation TU; the suite above defines

@@ -161,6 +161,14 @@
       velocity command drops below the deadbands, the offsets decay to zero
       exponentially (time constant cfg.settle_time, hard-zeroed once each
       component is below 0.5 mm) and the robot stands at its nominal pose.
+      The moving/standing decision is hysteretic: walking starts when any
+      velocity component exceeds its deadband and stops only once every
+      component falls below half of it, so a command that dithers around the
+      deadbands cannot toggle the engine every tick.
+
+      sakin_update clamps its time step: non-finite (NaN/inf) and negative dt
+      are treated as zero and oversized steps are capped at 0.1 s, so a stalled
+      or wrapped clock cannot poison the state or spin the phase loop.
 
       The gait tables (leg phase order, push steps, cycle steps, step time)
       are the exact NUKE values proven on the real robot, exposed through
@@ -171,7 +179,7 @@
       sakin_jump_start runs a squat-thrust-retract-land sequence that
       overrides the gait until touchdown. The timing matches the original
       behaviour exactly, including the foot-target discontinuity on the
-      squat->thrust boundary tick.
+      squat->thrust boundary tick. sakin_reset_pose cancels an in-flight jump.
 
    CREDITS
 
@@ -181,6 +189,10 @@
 
 RECENT REVISION HISTORY:
 
+      2026-11-12  v0.2.2: replace the `next.z > 1 mm` airborne proxy with an
+                  explicit per-leg airborne state (low lift_height now walks
+                  correctly); sakin_reset_pose cancels an in-flight jump;
+                  document hysteresis, the dt clamp and the settle thresholds
       2026-11-12  v0.2.1: state-machine hardening -- non-finite/oversize dt
                   clamp (NaN poisoned the gait offsets, +inf/gigantic dt
                   spun the phase-clock loop) and a hysteretic moving latch
@@ -207,8 +219,8 @@ extern "C" {
 // library version
 #define SAKIN_VERSION_MAJOR 0
 #define SAKIN_VERSION_MINOR 2
-#define SAKIN_VERSION_PATCH 1
-#define SAKIN_VERSION "0.2.1"
+#define SAKIN_VERSION_PATCH 2
+#define SAKIN_VERSION "0.2.2"
 
 // declaration specifier: override SAKIN_DEF directly, or #define SAKIN_STATIC
 #ifndef SAKIN_DEF
@@ -376,6 +388,7 @@ typedef struct {
   sakin_real_t t_in_step;
   int primed;
   int moving_latched; // hysteretic moving/standing mode (see sakin__gait_update)
+  int airborne[SAKIN_MAX_LEGS]; // per-leg: last boundary target was the swing apex
   sakin_vec3_t prev[SAKIN_MAX_LEGS], next[SAKIN_MAX_LEGS];
 
 #ifndef SAKIN_NO_JUMP
@@ -703,6 +716,7 @@ static void sakin__load_gait(sakin_t* s, int gait_id) {
   for (l = 0; l < SAKIN_MAX_LEGS; ++l) { // freeze for continuity
     s->prev[l] = s->offsets[l];
     s->next[l] = s->offsets[l];
+    s->airborne[l] = 0;
   }
 }
 
@@ -747,18 +761,22 @@ SAKIN_DEF void sakin_body_height(sakin_t* s, sakin_real_t z) {
 }
 
 // the NUKE rule, evaluated once per step boundary for one leg
-static sakin_vec3_t sakin__boundary_target(const sakin_t* s, int leg) {
+static sakin_vec3_t sakin__boundary_target(sakin_t* s, int leg) {
   const sakin_config_t* c = &s->cfg;
   sakin_vec3_t t;
   int swing_step = s->gait_leg_no[leg];
+  int was_airborne = s->airborne[leg];
 
   if (s->step == swing_step) {
     // swing apex: foot lifted, centred over the nominal foothold
     t = sakin__vec3(0, 0, c->lift_height);
-  } else if (s->step == (swing_step + 1) % s->steps_in_cycle && s->next[leg].z > 1.0f) {
+    s->airborne[leg] = 1;
+  } else if (s->step == (swing_step + 1) % s->steps_in_cycle && was_airborne) {
     // touch down ahead: translation stride + exact rotation share.
-    // next[leg].z > 1.0f means the leg was airborne (its last target was the
-    // swing apex), so the step just completed was its swing step.
+    // `airborne` records that this leg's previous boundary target was its
+    // swing apex -- an explicit state bit, so any lift_height works (the old
+    // next.z > 1 mm proxy silently disabled this branch for low lift).
+    s->airborne[leg] = 0;
     sakin_real_t k = s->cycle_time * s->push_steps / (2.0f * s->steps_in_cycle);
     // k = HALF the stance-phase duration. The foot is placed v*k ahead at
     // touchdown so that, dragging back at -v through the whole stance, it
@@ -778,6 +796,7 @@ static sakin_vec3_t sakin__boundary_target(const sakin_t* s, int leg) {
     sakin_real_t k = s->cycle_time / s->steps_in_cycle;
     sakin_vec3_t nxt = s->next[leg];
     t = sakin__vec3(nxt.x - s->vx * k, nxt.y - s->vy * k, 0);
+    s->airborne[leg] = 0;
     if (SAKIN__FABS(s->omega) > (sakin_real_t)1e-9) {
       sakin_vec3_t ep = s->endpoints[leg];
       sakin_real_t fx = ep.x + t.x, fy = ep.y + t.y;
@@ -823,11 +842,13 @@ static void sakin__settle(sakin_t* s, sakin_real_t dt) {
       s->offsets[l] = sakin__vec3(0, 0, 0);
       s->prev[l] = sakin__vec3(0, 0, 0);
       s->next[l] = sakin__vec3(0, 0, 0);
+      s->airborne[l] = 0;
     }
   } else {
     for (l = 0; l < SAKIN_MAX_LEGS; ++l) {
       s->prev[l] = s->offsets[l];
       s->next[l] = s->offsets[l];
+      s->airborne[l] = 0;
     }
   }
 }
@@ -997,6 +1018,12 @@ SAKIN_DEF void sakin_reset_pose(sakin_t* s) {
     s->endpoints[l] = sakin_stance_foot(&s->cfg, l);
   s->moving_latched = 0;
   s->gait_id = -1;
+#ifndef SAKIN_NO_JUMP
+  // a reset returns to standing: do not let an in-flight jump keep overriding
+  s->jump_active = 0;
+  s->jump_phase = SAKIN_JUMP_NONE;
+  s->jump_timer = 0;
+#endif
   sakin__load_gait(s, SAKIN_GAIT_TRIPOD); // NUKE default
 }
 
@@ -1072,6 +1099,10 @@ SAKIN_DEF int sakin_update(sakin_t* s, sakin_real_t dt, sakin_leg_angles_t* angl
 /*
    FULL REVISION HISTORY
 
+      2026-11-12  v0.2.2: replace the `next.z > 1 mm` airborne proxy with an
+                  explicit per-leg airborne state (low lift_height now walks
+                  correctly); sakin_reset_pose cancels an in-flight jump;
+                  document hysteresis, the dt clamp and the settle thresholds
       2026-11-12  v0.2.1: state-machine hardening -- non-finite/oversize dt
                   clamp (NaN poisoned the gait offsets, +inf/gigantic dt
                   spun the phase-clock loop) and a hysteretic moving latch
