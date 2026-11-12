@@ -63,7 +63,7 @@ if (status & SAKIN_IK_CLIPPED_WORKSPACE) { /* target out of reach */ }
 > is valid C but **not** valid standard C++. In C99 you can still use it; in C++,
 > assign the fields as shown above.
 
-The version is available at compile time as `SAKIN_VERSION` (`"0.2.0"`) and
+The version is available at compile time as `SAKIN_VERSION` (`"0.2.1"`) and
 `SAKIN_VERSION_MAJOR` / `_MINOR` / `_PATCH`.
 
 ## Configuration Macros
@@ -81,7 +81,7 @@ jump tuning live in `sakin_config_t`; see the doc block at the top of
 `sakin.h` for frames/conventions and the theory references (Craig ch. 4;
 De Luca, *Robotics 1: Inverse kinematics*).
 
-Also available: `SAKIN_VERSION` (`"0.2.0"`) and `SAKIN_VERSION_MAJOR` /
+Also available: `SAKIN_VERSION` (`"0.2.1"`) and `SAKIN_VERSION_MAJOR` /
 `_MINOR` / `_PATCH`.
 
 > `SAKIN_STATIC` gives every public function internal linkage. The flip side is
@@ -218,6 +218,12 @@ cc -std=c99 -Wall -Wextra -Werror -pedantic tests/config_matrix.c -lm -o config_
 # C++ (Arduino/ESP32) build check
 c++ -std=c++11 -Wall -Wextra -Werror tests/cpp_compile_check.cpp -lm -o cpp_compile_check
 ./cpp_compile_check
+
+# state-machine regression tests (see file headers for the invariants)
+cc -std=c99 -Wall -Wextra -Werror -pedantic tests/regress_deadband_hysteresis.c -lm -o regress_deadband
+./regress_deadband
+cc -std=c99 -Wall -Wextra -Werror -pedantic tests/regress_large_dt.c -lm -o regress_dt
+./regress_dt
 ```
 
 `sakin.c` is the optional convenience implementation TU; the suite above defines

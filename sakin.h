@@ -181,6 +181,11 @@
 
 RECENT REVISION HISTORY:
 
+      2026-11-12  v0.2.1: state-machine hardening -- non-finite/oversize dt
+                  clamp (NaN poisoned the gait offsets, +inf/gigantic dt
+                  spun the phase-clock loop) and a hysteretic moving latch
+                  (dithering around the deadbands no longer halves the gait
+                  cadence); regression tests for both
       2026-11-09  v0.2.0: hardening (null/bounds guards, dt clamp,
                   settle_time guard, SAKIN_MAX_LEGS >= 1 assert) and
                   SAKIN_VERSION; optional sakin.c convenience TU; 0BSD license
@@ -202,8 +207,8 @@ extern "C" {
 // library version
 #define SAKIN_VERSION_MAJOR 0
 #define SAKIN_VERSION_MINOR 2
-#define SAKIN_VERSION_PATCH 0
-#define SAKIN_VERSION "0.2.0"
+#define SAKIN_VERSION_PATCH 1
+#define SAKIN_VERSION "0.2.1"
 
 // declaration specifier: override SAKIN_DEF directly, or #define SAKIN_STATIC
 #ifndef SAKIN_DEF
@@ -370,6 +375,7 @@ typedef struct {
   int step;
   sakin_real_t t_in_step;
   int primed;
+  int moving_latched; // hysteretic moving/standing mode (see sakin__gait_update)
   sakin_vec3_t prev[SAKIN_MAX_LEGS], next[SAKIN_MAX_LEGS];
 
 #ifndef SAKIN_NO_JUMP
@@ -828,10 +834,24 @@ static void sakin__settle(sakin_t* s, sakin_real_t dt) {
 
 // advance the clock and produce this tick's interpolated offsets
 static void sakin__gait_update(sakin_t* s, sakin_real_t dt) {
-  int moving = SAKIN__FABS(s->vx) > s->cfg.deadband_lin ||
-               SAKIN__FABS(s->vy) > s->cfg.deadband_lin ||
-               SAKIN__FABS(s->omega) > s->cfg.deadband_rot;
+  const sakin_config_t* c = &s->cfg;
+  sakin_real_t vb = SAKIN__FMAX(SAKIN__FABS(s->vx), SAKIN__FABS(s->vy));
+  sakin_real_t wb = SAKIN__FABS(s->omega);
+  // Hysteresis on the implicit moving/standing mode: enter when a component
+  // exceeds its deadband, leave only when ALL components fall below half of
+  // it. Velocity that dithers around the deadband therefore keeps the gait
+  // running instead of toggling into settle and re-priming every other tick.
+  int above = vb > c->deadband_lin || wb > c->deadband_rot;
+  int below = vb <= c->deadband_lin * (sakin_real_t)0.5 &&
+              wb <= c->deadband_rot * (sakin_real_t)0.5;
+  int moving;
   int l;
+
+  if (above)
+    s->moving_latched = 1;
+  else if (below)
+    s->moving_latched = 0;
+  moving = s->moving_latched;
 
   if (!moving) {
     sakin__settle(s, dt);
@@ -975,6 +995,7 @@ SAKIN_DEF void sakin_reset_pose(sakin_t* s) {
   }
   for (l = 0; l < s->cfg.leg_count; ++l)
     s->endpoints[l] = sakin_stance_foot(&s->cfg, l);
+  s->moving_latched = 0;
   s->gait_id = -1;
   sakin__load_gait(s, SAKIN_GAIT_TRIPOD); // NUKE default
 }
@@ -1017,9 +1038,15 @@ SAKIN_DEF int sakin_update(sakin_t* s, sakin_real_t dt, sakin_leg_angles_t* angl
 
   c = &s->cfg;
 
-  // negative time steps would run the smoothstep and jump timers backwards
-  if (dt < (sakin_real_t)0)
+  // Reject non-finite / negative steps and clamp large ones. A NaN dt would
+  // poison the gait offsets and every output angle; +inf would make the phase
+  // clock's `while (t_in_step >= tran_ms)` loop forever; and a huge finite dt
+  // costs O(dt / tran_ms) iterations, which can trip a watchdog on an MCU.
+  // `!(dt >= 0)` is true for NaN as well as negatives.
+  if (!(dt >= (sakin_real_t)0))
     dt = (sakin_real_t)0;
+  else if (dt > (sakin_real_t)0.1)
+    dt = (sakin_real_t)0.1;
 
 #ifndef SAKIN_NO_JUMP
   if (sakin__jump_update(s, dt, angles_out, &flags))
@@ -1045,6 +1072,11 @@ SAKIN_DEF int sakin_update(sakin_t* s, sakin_real_t dt, sakin_leg_angles_t* angl
 /*
    FULL REVISION HISTORY
 
+      2026-11-12  v0.2.1: state-machine hardening -- non-finite/oversize dt
+                  clamp (NaN poisoned the gait offsets, +inf/gigantic dt
+                  spun the phase-clock loop) and a hysteretic moving latch
+                  (dithering around the deadbands no longer halves the gait
+                  cadence); regression tests for both
       2026-11-09  v0.2.0: hardening (null/bounds guards, dt clamp,
                   settle_time guard, SAKIN_MAX_LEGS >= 1 assert) and
                   SAKIN_VERSION; optional sakin.c convenience TU; 0BSD license,
